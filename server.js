@@ -1052,9 +1052,21 @@ app.post('/api/voice/llm-command', async (req, res) => {
         res.status(500).json({ success: false, message: "Server error." });
     }
 });
-
+// GET all rooms IoT state in one shot — dùng cho Dashboard
+app.get('/api/iot/all', async (req, res) => {
+    try {
+        const [rows] = await pool.query(`
+            SELECT i.*, r.room_number 
+            FROM room_iot_state i
+            JOIN room r ON i.room_id = r.room_id
+        `);
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 //Simulate after 3s
-setInterval(runIoTSimulation, 10000);
+setInterval(runIoTSimulation, 5000);
 
 module.exports = app;
 
