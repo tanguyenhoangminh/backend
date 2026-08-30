@@ -1066,7 +1066,8 @@ app.post('/api/voice/llm-command', async (req, res) => {
         res.status(500).json({ success: false, message: "Server error." });
     }
 });
-
+//wake up cho monitor tránh render tắt
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 //Simulate after 5s
 setInterval(runIoTSimulation, 5000);
 
