@@ -755,20 +755,21 @@ const runIoTSimulation = async () => {
             // ==========================================================
             // 🌟 [MỚI THÊM] LOGIC CHẶN CẬP NHẬT ẢO CHO PHÒNG THẬT
             // ==========================================================
-            let newTemp = room.temp;
-            let newHumidity = room.humidity;
-            let newLight = room.light;
-            let newMotion = room.motion;
+            let newTemp = Number(room.temp) || 25;
+            let newHumidity = Number(room.humidity) || 60;
+            let newLight = Number(room.light) || 300;
+            let newMotion = room.motion || false;
 
             // 🔒 CHỈ KHI LÀ PHÒNG ẢO (KHÔNG LẮP MẠCH) THÌ MỚI CHẠY RANDOM 4 SENSOR NÀY
+            // Dùng || để fallback về giá trị mặc định khi DB trả NULL (phòng mới, chưa có data)
             if (!isRealRoom) {
-                newTemp = clamp(room.temp + (targetTemp - room.temp) * 0.5 + randomNoise(-0.1, 0.1), 16, 45);
-                newHumidity = clamp(room.humidity + (targetHumidity - room.humidity) * 0.6 + randomNoise(-0.5, 0.5), 20, 100);
+                newTemp = clamp((Number(room.temp) || 25) + (targetTemp - (Number(room.temp) || 25)) * 0.5 + randomNoise(-0.1, 0.1), 16, 45);
+                newHumidity = clamp((Number(room.humidity) || 60) + (targetHumidity - (Number(room.humidity) || 60)) * 0.6 + randomNoise(-0.5, 0.5), 20, 100);
                 newLight = clamp(targetLight + randomNoise(-2, 2), 0, 1500);
                 newMotion = Math.random() < 0.05 ? !room.motion : room.motion;
             }
 
-            let newCo2 = clamp(room.co2 + (targetCo2 - room.co2) * 0.7 + randomNoise(-2, 2), 300, 2000);
+            let newCo2 = clamp((Number(room.co2) || 450) + (targetCo2 - (Number(room.co2) || 450)) * 0.7 + randomNoise(-2, 2), 300, 2000);
             let newNoise = clamp(targetNoise + randomNoise(-1, 1), 20, 130);
             
             // LOGIC RIÊNG: LEAKING VÀ ENERGY CỘNG DỒN
