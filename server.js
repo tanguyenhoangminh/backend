@@ -520,6 +520,20 @@ app.put('/api/alerts/resolve/:room_number/:alert_type', async (req, res) => {
 // ==========================================
 // --- API THIẾT BỊ VÀ ĐIỀU KHIỂN IOT ---
 // ==========================================
+
+app.get('/api/iot/all', async (req, res) => {
+    try {
+        const [rows] = await pool.query(`
+            SELECT i.*, r.room_number 
+            FROM room_iot_state i
+            JOIN room r ON i.room_id = r.room_id
+        `);
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.get('/api/iot/:room_number', async (req, res) => {
     try {
         const sql = `
@@ -1052,20 +1066,8 @@ app.post('/api/voice/llm-command', async (req, res) => {
         res.status(500).json({ success: false, message: "Server error." });
     }
 });
-// GET all rooms IoT state in one shot — dùng cho Dashboard
-app.get('/api/iot/all', async (req, res) => {
-    try {
-        const [rows] = await pool.query(`
-            SELECT i.*, r.room_number 
-            FROM room_iot_state i
-            JOIN room r ON i.room_id = r.room_id
-        `);
-        res.json(rows);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-//Simulate after 3s
+
+//Simulate after 5s
 setInterval(runIoTSimulation, 5000);
 
 module.exports = app;
