@@ -566,39 +566,37 @@ app.get('/api/iot/:room_number', async (req, res) => {
     }
 });
 
+// Thay đoạn PUT /api/iot/:room_number/control (line 569-606)
 app.put('/api/iot/:room_number/control', async (req, res) => {
-    const { deviceKey, value } = req.body; 
+    const { deviceKey, value } = req.body;
     try {
         const [rooms] = await pool.query("SELECT room_id FROM room WHERE room_number = ?", [req.params.room_number]);
         if (rooms.length === 0) return res.status(404).json({ error: "Không tìm thấy phòng" });
-        
         const roomId = rooms[0].room_id;
-        
+
+
+        if (deviceKey === 'main_brightness' || deviceKey === 'desk_brightness') {
+            await pool.query(`UPDATE room_iot_state SET ${deviceKey} = ? WHERE room_id = ?`, [value, roomId]);
+            const mqttDevice = deviceKey === 'main_brightness' ? 'main_light' : 'desk_lamp';
+            mqttClient.publish(
+                `hotel/room/${req.params.room_number}/control`,
+                JSON.stringify({ device: mqttDevice, brightness: value }),
+                { qos: 1 }
+            );
+            return res.json({ message: "Đã cập nhật brightness" });
+        }
+
         if (deviceKey === 'door_lock') {
-            const doorOpenValue = !value;
-            const sql = `UPDATE room_iot_state SET door_lock = ?, door_open = ? WHERE room_id = ?`;
-            await pool.query(sql, [value, doorOpenValue, roomId]);
+            await pool.query(`UPDATE room_iot_state SET door_lock = ?, door_open = ? WHERE room_id = ?`, [value, !value, roomId]);
         } else {
-            const sql = `UPDATE room_iot_state SET ${deviceKey} = ? WHERE room_id = ?`;
-            await pool.query(sql, [value, roomId]);
+            await pool.query(`UPDATE room_iot_state SET ${deviceKey} = ? WHERE room_id = ?`, [value, roomId]);
         }
 
-        // Nếu có brightness thì lưu luôn
-        const { brightness } = req.body;
-        if (brightness !== undefined && (deviceKey === 'main_light' || deviceKey === 'desk_lamp')) {
-            const brightnessCol = deviceKey === 'main_light' ? 'main_brightness' : 'desk_brightness';
-            await pool.query(`UPDATE room_iot_state SET ${brightnessCol} = ? WHERE room_id = ?`, [brightness, roomId]);
-        }
-
-        // PHÁT LỆNH MQTT XUỐNG MẠCH THẬT
-        const controlTopic = `hotel/room/${req.params.room_number}/control`;
-        const payload = JSON.stringify({ 
-            device: deviceKey, 
-            state: value,
-            ...(brightness !== undefined && { brightness }) // gửi brightness nếu có
-        });
-        mqttClient.publish(controlTopic, payload, { qos: 1 });
-
+        mqttClient.publish(
+            `hotel/room/${req.params.room_number}/control`,
+            JSON.stringify({ device: deviceKey, state: value }),
+            { qos: 1 }
+        );
         res.json({ message: "Đã cập nhật thiết bị" });
     } catch (error) {
         res.status(500).json({ error: error.message });
