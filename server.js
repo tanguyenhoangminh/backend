@@ -1,10 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
-const mqtt = require('mqtt'); // [MỚI THÊM] Thư viện MQTT
-require('dotenv').config(); // đọc GROQ_API_KEY / OPENROUTER_API_KEY từ file .env
+const mqtt = require('mqtt'); 
+require('dotenv').config(); 
 
-// 🎙️ Voice NLU — dùng fetch có sẵn từ Node 18+, không thêm axios
+//  Voice NLU 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; // optional, chỉ dùng khi Groq lỗi
 
