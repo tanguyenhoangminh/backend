@@ -755,7 +755,7 @@ const runIoTSimulation = async () => {
             if (room.main_power) {
                 energyCost += 0.001; 
                 if (room.main_light) { 
-                    const mainBri = (Number(room.main_brightness) || 100) / 100;
+                    const mainBri = (Number(room.light_brightness) || 100) / 100;
                     targetLight += 300 * mainBri; 
                     energyCost += 0.01 * mainBri;  // dim → tốn ít điện hơn
                 }
