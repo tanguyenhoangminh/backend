@@ -1,10 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
-const mqtt = require('mqtt'); 
+const mqtt = require('mqtt'); Thư viện MQTT
 require('dotenv').config(); 
 
-//  Voice NLU 
+// Voice NLU 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; // optional, chỉ dùng khi Groq lỗi
 
@@ -23,6 +23,12 @@ const pool = mysql.createPool({
     connectionLimit: 10,
     queueLimit: 0
 });
+
+// Thêm cột brightness nếu chưa có (safe migration)
+pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS main_brightness INT DEFAULT 100`)
+  .catch(() => {}); // ignore nếu đã có
+pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS desk_brightness INT DEFAULT 100`)
+  .catch(() => {}); // ignore nếu đã có
 
 pool.query(`
     CREATE TABLE IF NOT EXISTS alert_acks (
@@ -114,19 +120,30 @@ mqttClient.on('message', async (topic, message) => {
         if (rooms.length === 0) return;
         const roomId = rooms[0].room_id;
 
-        // Cập nhật 3 cảm biến: DHT11 (temp, humidity), Quang trở (light), PIR (motion)
-        const sqlUpdate = `
-            UPDATE room_iot_state 
-            SET temp=?, humidity=?, light=?, motion=?
-            WHERE room_id=?
-        `;
-        await pool.query(sqlUpdate, [
-            sensorData.temp || 24.0,       
-            sensorData.humidity || 50.0,   
-            sensorData.light || 300.0,     
-            sensorData.motion || false,    
-            roomId
-        ]);
+        // Cập nhật sensor + actuator state từ ESP8266
+        // Chỉ update field nào ESP gửi lên, field nào null thì giữ nguyên DB
+        const fields = [];
+        const values = [];
+
+        if (sensorData.temp      !== undefined) { fields.push('temp=?');      values.push(sensorData.temp); }
+        if (sensorData.humidity  !== undefined) { fields.push('humidity=?');  values.push(sensorData.humidity); }
+        if (sensorData.light     !== undefined) { fields.push('light=?');     values.push(sensorData.light); }
+        if (sensorData.motion    !== undefined) { fields.push('motion=?');    values.push(sensorData.motion); }
+        if (sensorData.smoke     !== undefined) { fields.push('smoke=?');     values.push(sensorData.smoke); }
+        if (sensorData.smoke_alert !== undefined) { fields.push('siren=?');   values.push(sensorData.smoke_alert); }
+        // Brightness từ Node 2
+        if (sensorData.main_light      !== undefined) { fields.push('main_light=?');      values.push(sensorData.main_light); }
+        if (sensorData.desk_lamp       !== undefined) { fields.push('desk_lamp=?');       values.push(sensorData.desk_lamp); }
+        if (sensorData.main_brightness !== undefined) { fields.push('main_brightness=?'); values.push(sensorData.main_brightness); }
+        if (sensorData.desk_brightness !== undefined) { fields.push('desk_brightness=?'); values.push(sensorData.desk_brightness); }
+
+        if (fields.length > 0) {
+            values.push(roomId);
+            await pool.query(
+                `UPDATE room_iot_state SET ${fields.join(', ')} WHERE room_id=?`,
+                values
+            );
+        }
         
     } catch (error) {
         console.error("Lỗi xử lý tin nhắn MQTT:", error);
@@ -566,9 +583,20 @@ app.put('/api/iot/:room_number/control', async (req, res) => {
             await pool.query(sql, [value, roomId]);
         }
 
-        // 🌟 [MỚI THÊM] PHÁT LỆNH MQTT XUỐNG MẠCH THẬT KHI ĐIỀU KHIỂN
+        // Nếu có brightness thì lưu luôn
+        const { brightness } = req.body;
+        if (brightness !== undefined && (deviceKey === 'main_light' || deviceKey === 'desk_lamp')) {
+            const brightnessCol = deviceKey === 'main_light' ? 'main_brightness' : 'desk_brightness';
+            await pool.query(`UPDATE room_iot_state SET ${brightnessCol} = ? WHERE room_id = ?`, [brightness, roomId]);
+        }
+
+        // PHÁT LỆNH MQTT XUỐNG MẠCH THẬT
         const controlTopic = `hotel/room/${req.params.room_number}/control`;
-        const payload = JSON.stringify({ device: deviceKey, state: value });
+        const payload = JSON.stringify({ 
+            device: deviceKey, 
+            state: value,
+            ...(brightness !== undefined && { brightness }) // gửi brightness nếu có
+        });
         mqttClient.publish(controlTopic, payload, { qos: 1 });
 
         res.json({ message: "Đã cập nhật thiết bị" });
@@ -617,7 +645,7 @@ app.post('/api/prediction', async (req, res) => {
     }
 });
 
-// [MỚI THÊM] Lấy prediction MỚI NHẤT của TẤT CẢ phòng — dùng cho Dashboard/RoomsScreen
+//Lấy prediction MỚI NHẤT của TẤT CẢ phòng — dùng cho Dashboard/RoomsScreen
 app.get('/api/prediction/latest', async (req, res) => {
     try {
         const sql = `
@@ -726,8 +754,16 @@ const runIoTSimulation = async () => {
 
             if (room.main_power) {
                 energyCost += 0.001; 
-                if (room.main_light) { targetLight += 300; energyCost += 0.01; }
-                if (room.desk_lamp) { targetLight += 100; energyCost += 0.005; }
+                if (room.main_light) { 
+                    const mainBri = (Number(room.main_brightness) || 100) / 100;
+                    targetLight += 300 * mainBri; 
+                    energyCost += 0.01 * mainBri;  // dim → tốn ít điện hơn
+                }
+                if (room.desk_lamp) { 
+                    const deskBri = (Number(room.desk_brightness) || 100) / 100;
+                    targetLight += 100 * deskBri; 
+                    energyCost += 0.005 * deskBri; 
+                }
                 if (room.bedside_lamp) { targetLight += 50; energyCost += 0.002; }
                 if (room.tv) { targetLight += 30; targetNoise += 35; energyCost += 0.02; }
                 
@@ -767,14 +803,14 @@ const runIoTSimulation = async () => {
             if (currentSiren) { targetNoise = 100; energyCost += 0.01; }
 
             // ==========================================================
-            // 🌟 [MỚI THÊM] LOGIC CHẶN CẬP NHẬT ẢO CHO PHÒNG THẬT
+            //LOGIC CHẶN CẬP NHẬT ẢO CHO PHÒNG THẬT
             // ==========================================================
             let newTemp = Number(room.temp) || 25;
             let newHumidity = Number(room.humidity) || 60;
             let newLight = Number(room.light) || 300;
             let newMotion = room.motion || false;
 
-            // 🔒 CHỈ KHI LÀ PHÒNG ẢO (KHÔNG LẮP MẠCH) THÌ MỚI CHẠY RANDOM 4 SENSOR NÀY
+            //CHỈ KHI LÀ PHÒNG ẢO (KHÔNG LẮP MẠCH) THÌ MỚI CHẠY RANDOM 4 SENSOR NÀY
             // Dùng || để fallback về giá trị mặc định khi DB trả NULL (phòng mới, chưa có data)
             if (!isRealRoom) {
                 newTemp = clamp((Number(room.temp) || 25) + (targetTemp - (Number(room.temp) || 25)) * 0.5 + randomNoise(-0.1, 0.1), 16, 45);
