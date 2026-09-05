@@ -128,6 +128,7 @@ mqttClient.on('message', async (topic, message) => {
         if (sensorData.temp      !== undefined) { fields.push('temp=?');      values.push(sensorData.temp); }
         if (sensorData.humidity  !== undefined) { fields.push('humidity=?');  values.push(sensorData.humidity); }
         if (sensorData.co2       !== undefined) { fields.push('co2=?');       values.push(sensorData.co2); }
+        if (sensorData.noise     !== undefined) { fields.push('noise=?');     values.push(sensorData.noise); }
         if (sensorData.light     !== undefined) { fields.push('light=?');     values.push(sensorData.light); }
         if (sensorData.motion    !== undefined) { fields.push('motion=?');    values.push(sensorData.motion); }
         if (sensorData.smoke     !== undefined) { fields.push('smoke=?');     values.push(sensorData.smoke); }
