@@ -1107,7 +1107,7 @@ app.post('/api/voice/llm-command', async (req, res) => {
 //wake up cho monitor tránh render tắt
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 //Simulate after 5s
-setInterval(runIoTSimulation, 5000);
+//setInterval(runIoTSimulation, 5000);
 
 module.exports = app;
 
