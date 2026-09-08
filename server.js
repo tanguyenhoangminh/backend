@@ -576,35 +576,36 @@ app.get('/api/iot/:room_number', async (req, res) => {
 });
 
 app.put('/api/iot/:room_number/control', async (req, res) => {
-    const { deviceKey, value } = req.body; 
+    const { deviceKey, value, brightness } = req.body; 
     try {
         const [rooms] = await pool.query("SELECT room_id FROM room WHERE room_number = ?", [req.params.room_number]);
         if (rooms.length === 0) return res.status(404).json({ error: "Không tìm thấy phòng" });
         
         const roomId = rooms[0].room_id;
+        const valNum = (value === true || value === 1 || value === '1') ? 1 : 0;
         
         if (deviceKey === 'door_lock') {
-            const doorOpenValue = !value;
+            const doorOpenValue = valNum ? 0 : 1;
             const sql = `UPDATE room_iot_state SET door_lock = ?, door_open = ?, updated_at = NOW() WHERE room_id = ?`;
-            await pool.query(sql, [value, doorOpenValue, roomId]);
+            await pool.query(sql, [valNum, doorOpenValue, roomId]);
         } else {
             const sql = `UPDATE room_iot_state SET ${deviceKey} = ?, updated_at = NOW() WHERE room_id = ?`;
-            await pool.query(sql, [value, roomId]);
+            await pool.query(sql, [valNum, roomId]);
         }
 
         // Nếu có brightness thì lưu luôn
-        const { brightness } = req.body;
         if (brightness !== undefined && (deviceKey === 'main_light' || deviceKey === 'desk_lamp')) {
             const brightnessCol = deviceKey === 'main_light' ? 'light_brightness' : 'desk_brightness';
             await pool.query(`UPDATE room_iot_state SET ${brightnessCol} = ?, updated_at = NOW() WHERE room_id = ?`, [brightness, roomId]);
         }
 
-        // PHÁT LỆNH MQTT XUỐNG MẠCH THẬT
+        // PHÁT LỆNH MQTT XUỐNG MẠCH THẬT (Gắn sender để Pi phân biệt nguồn Cloud)
         const controlTopic = `hotel/room/${req.params.room_number}/control`;
         const payload = JSON.stringify({ 
+            sender: 'railway_cloud',
             device: deviceKey, 
-            state: value, 
-            ...(brightness !== undefined && { brightness }) // gửi brightness nếu có
+            state: valNum, 
+            ...(brightness !== undefined && { brightness })
         });
         mqttClient.publish(controlTopic, payload, { qos: 1 });
 
