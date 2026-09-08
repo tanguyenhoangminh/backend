@@ -1092,30 +1092,42 @@ app.post('/api/sync/rooms', async (req, res) => {
     let updated = 0, skipped = 0;
     try {
         for (const row of rows) {
-            const { room_number, updated_at } = row;
+            const { room_number, updated_at_ms, updated_at } = row;
             if (!room_number) { skipped++; continue; }
 
             const [rooms] = await pool.query("SELECT room_id FROM room WHERE room_number = ?", [room_number]);
             if (rooms.length === 0) { skipped++; continue; }
             const roomId = rooms[0].room_id;
 
-            const [current] = await pool.query("SELECT updated_at FROM room_iot_state WHERE room_id = ?", [roomId]);
+            // Lấy timestamp miligiây của Cloud
+            const [current] = await pool.query(
+                "SELECT UNIX_TIMESTAMP(updated_at) * 1000 AS current_time_ms FROM room_iot_state WHERE room_id = ?", 
+                [roomId]
+            );
             
-            // Chuẩn hóa sang mili-giây UTC để triệt tiêu lệch múi giờ
-            const currentTime = current[0]?.updated_at ? new Date(current[0].updated_at).getTime() : 0;
-            const incomingTime = updated_at ? new Date(updated_at).getTime() : 0;
+            const currentTime = current[0]?.current_time_ms ? Number(current[0].current_time_ms) : 0;
+            // Ưu tiên dùng updated_at_ms dạng số từ Pi gửi lên
+            const incomingTime = updated_at_ms ? Number(updated_at_ms) : (updated_at ? new Date(updated_at).getTime() : 0);
 
-            // NẾU CLOUD MỚI HƠN PI TỐI THIỂU 1 GIÂY -> GIỮ NGUYÊN TRẠNG THÁI CLOUD ĐỂ CHỜ PI KÉO VỀ
+            // Nếu dữ liệu trên Railway mới hơn Pi quá 1 giây -> Không đè, để Pi tự kéo về
             if (currentTime - incomingTime > 1000) {
                 skipped++;
                 continue;
             }
 
-            const cols = Object.keys(row).filter(c => SYNCABLE_COLUMNS.includes(c) && row[c] !== undefined && row[c] !== null);
+            const cols = Object.keys(row).filter(c => 
+                SYNCABLE_COLUMNS.includes(c) && 
+                row[c] !== undefined && 
+                row[c] !== null &&
+                c !== 'updated_at' &&
+                c !== 'updated_at_ms'
+            );
             if (cols.length === 0) { skipped++; continue; }
 
             const setClause = cols.map(c => `${c} = ?`).join(', ');
             const values = cols.map(c => row[c]);
+            
+            // Ép cập nhật updated_at theo mốc thời gian chuẩn
             values.push(new Date(incomingTime), roomId);
 
             await pool.query(
@@ -1125,7 +1137,7 @@ app.post('/api/sync/rooms', async (req, res) => {
             updated++;
         }
 
-        // Lấy lại danh sách hiện tại của Cloud gửi về cho Pi
+        // Truy vấn trạng thái mới nhất của Cloud trả về cho Pi
         const [cloudRows] = await pool.query(`
             SELECT r.room_number, i.* 
             FROM room_iot_state i 
@@ -1134,6 +1146,7 @@ app.post('/api/sync/rooms', async (req, res) => {
 
         res.json({ message: "Sync xong", updated, skipped, cloudRows });
     } catch (error) {
+        console.error("Lỗi sync tại Railway:", error);
         res.status(500).json({ error: error.message });
     }
 });
