@@ -30,6 +30,10 @@ pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS main_brightness 
 pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS desk_brightness INT DEFAULT 100`)
   .catch(() => {}); // ignore nếu đã có
 
+// [MỚI THÊM] Migration cột updated_at cho State Reconciliation
+pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`)
+  .catch(() => {});
+
 pool.query(`
     CREATE TABLE IF NOT EXISTS alert_acks (
         room_number VARCHAR(10) NOT NULL,
@@ -678,7 +682,7 @@ app.get('/api/prediction/:room_number', async (req, res) => {
             ORDER BY predicted_at DESC
             LIMIT 1
         `;
-        const [rows] = await pool.query(sql, [req.params.room_number]);
+        const [rows] = await pool.query(sql);
         if (rows.length === 0) {
             return res.status(404).json({ error: "Chưa có prediction cho phòng này" });
         }
@@ -1104,6 +1108,62 @@ app.post('/api/voice/llm-command', async (req, res) => {
         res.status(500).json({ success: false, message: "Server error." });
     }
 });
+
+// ============================================================
+// --- [MỚI THÊM] STATE RECONCILIATION (NHẬN SYNC TỪ EDGE / PI) ---
+// ============================================================
+const SYNCABLE_COLUMNS = [
+    'temp', 'humidity', 'co2', 'noise', 'light', 'motion', 'smoke', 'siren',
+    'main_light', 'desk_lamp', 'bedside_lamp', 'tv', 'ac_power', 'ac_temp',
+    'fan', 'sprinkler', 'curtain', 'door_open', 'door_lock', 'main_power',
+    'energy', 'leak_detected', 'light_brightness', 'main_brightness', 'desk_brightness'
+];
+
+app.post('/api/sync/rooms', async (req, res) => {
+    const { rows } = req.body;
+    if (!Array.isArray(rows) || rows.length === 0) {
+        return res.json({ message: "Không có dữ liệu để sync", updated: 0, skipped: 0 });
+    }
+
+    let updated = 0, skipped = 0, notFound = 0;
+    try {
+        for (const row of rows) {
+            const { room_number, updated_at } = row;
+            if (!room_number) { skipped++; continue; }
+
+            const [rooms] = await pool.query("SELECT room_id FROM room WHERE room_number = ?", [room_number]);
+            if (rooms.length === 0) { notFound++; continue; }
+            const roomId = rooms[0].room_id;
+
+            // Kiểm tra Last-Write-Wins dựa trên timestamp
+            const [current] = await pool.query("SELECT updated_at FROM room_iot_state WHERE room_id = ?", [roomId]);
+            const currentTime = current[0]?.updated_at ? new Date(current[0].updated_at) : new Date(0);
+            const incomingTime = updated_at ? new Date(updated_at) : new Date();
+
+            if (incomingTime <= currentTime) {
+                skipped++;
+                continue;
+            }
+
+            const cols = Object.keys(row).filter(c => SYNCABLE_COLUMNS.includes(c) && row[c] !== undefined && row[c] !== null);
+            if (cols.length === 0) { skipped++; continue; }
+
+            const setClause = cols.map(c => `${c} = ?`).join(', ');
+            const values = cols.map(c => row[c]);
+            values.push(incomingTime, roomId);
+
+            await pool.query(
+                `UPDATE room_iot_state SET ${setClause}, updated_at = ? WHERE room_id = ?`,
+                values
+            );
+            updated++;
+        }
+        res.json({ message: "Sync xong", updated, skipped, notFound });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 //wake up cho monitor tránh render tắt
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 //Simulate after 5s
@@ -1112,7 +1172,7 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 module.exports = app;
 
 if (require.main === module) {
-    const PORT = 5000;
+    const PORT = process.env.PORT || 5000;
     app.listen(PORT, () => {
         console.log(`🚀 API Hotel Server chạy tại http://localhost:${PORT}`);
     });
