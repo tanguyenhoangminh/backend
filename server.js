@@ -892,7 +892,7 @@ const runIoTSimulation = async () => {
     }
 };
 
-setInterval(runIoTSimulation, 5000);
+//setInterval(runIoTSimulation, 5000);
 
 // ============================================================
 // 🎙️ VOICE COMMAND — LLM-BACKED INTENT PARSING
