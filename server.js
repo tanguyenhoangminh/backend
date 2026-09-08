@@ -1125,22 +1125,24 @@ app.post('/api/sync/rooms', async (req, res) => {
         return res.json({ message: "Không có dữ liệu để sync", updated: 0, skipped: 0, cloudRows: [] });
     }
 
-    let updated = 0, skipped = 0, notFound = 0;
+    let updated = 0, skipped = 0;
     try {
-        // 1. CHIỀU ĐI: Cập nhật từ Pi lên Cloud (Last-Write-Wins)
         for (const row of rows) {
             const { room_number, updated_at } = row;
             if (!room_number) { skipped++; continue; }
 
             const [rooms] = await pool.query("SELECT room_id FROM room WHERE room_number = ?", [room_number]);
-            if (rooms.length === 0) { notFound++; continue; }
+            if (rooms.length === 0) { skipped++; continue; }
             const roomId = rooms[0].room_id;
 
             const [current] = await pool.query("SELECT updated_at FROM room_iot_state WHERE room_id = ?", [roomId]);
-            const currentTime = current[0]?.updated_at ? new Date(current[0].updated_at) : new Date(0);
-            const incomingTime = updated_at ? new Date(updated_at) : new Date();
+            
+            // Chuẩn hóa sang mili-giây UTC để triệt tiêu lệch múi giờ
+            const currentTime = current[0]?.updated_at ? new Date(current[0].updated_at).getTime() : 0;
+            const incomingTime = updated_at ? new Date(updated_at).getTime() : 0;
 
-            if (incomingTime <= currentTime) {
+            // NẾU CLOUD MỚI HƠN PI TỐI THIỂU 1 GIÂY -> GIỮ NGUYÊN TRẠNG THÁI CLOUD ĐỂ CHỜ PI KÉO VỀ
+            if (currentTime - incomingTime > 1000) {
                 skipped++;
                 continue;
             }
@@ -1150,7 +1152,7 @@ app.post('/api/sync/rooms', async (req, res) => {
 
             const setClause = cols.map(c => `${c} = ?`).join(', ');
             const values = cols.map(c => row[c]);
-            values.push(incomingTime, roomId);
+            values.push(new Date(incomingTime), roomId);
 
             await pool.query(
                 `UPDATE room_iot_state SET ${setClause}, updated_at = ? WHERE room_id = ?`,
@@ -1159,22 +1161,14 @@ app.post('/api/sync/rooms', async (req, res) => {
             updated++;
         }
 
-        // 2. CHIỀU VỀ: Lấy toàn bộ trạng thái mới nhất trên Cloud trả về cho Pi
+        // Lấy lại danh sách hiện tại của Cloud gửi về cho Pi
         const [cloudRows] = await pool.query(`
             SELECT r.room_number, i.* 
             FROM room_iot_state i 
             JOIN room r ON i.room_id = r.room_id
         `);
 
-        // Trả kết quả kèm cloudRows
-        res.json({ 
-            message: "Sync xong", 
-            updated, 
-            skipped, 
-            notFound,
-            cloudRows 
-        });
-
+        res.json({ message: "Sync xong", updated, skipped, cloudRows });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
