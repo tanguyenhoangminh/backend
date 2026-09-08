@@ -40,6 +40,7 @@ const pool = mysql.createPool({
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || 'minhmongmo1',
     database: process.env.DB_NAME || 'iot_hotel',
+    timezone: '+00:00',          // ← THÊM
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
