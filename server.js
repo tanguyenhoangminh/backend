@@ -29,6 +29,8 @@ pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS main_brightness 
   .catch(() => {}); // ignore nếu đã có
 pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS desk_brightness INT DEFAULT 100`)
   .catch(() => {}); // ignore nếu đã có
+pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS light_brightness TINYINT UNSIGNED DEFAULT 100`)
+  .catch(() => {});
 
 // [MỚI THÊM] Migration cột updated_at cho State Reconciliation
 pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`)
@@ -115,7 +117,6 @@ mqttClient.on('message', async (topic, message) => {
         const topicParts = topic.split('/');
         const roomNumber = topicParts[2]; 
         
-       
         if (!REAL_ROOMS.includes(roomNumber)) return;
 
         const sensorData = JSON.parse(message.toString());
@@ -334,7 +335,7 @@ app.route('/api/bookings/:id')
     .delete(async (req, res) => {
         const connection = await pool.getConnection();
         try {
-            await connection.beginTransaction();
+            await connection.beginTransaction(); 
             const [booking] = await connection.query("SELECT room_id FROM booking WHERE booking_id = ?", [req.params.id]);
             if (booking.length > 0) {
                 await connection.query("UPDATE room SET status = 'available' WHERE room_id = ?", [booking[0].room_id]);
@@ -343,16 +344,18 @@ app.route('/api/bookings/:id')
             await connection.commit();
             res.json({ message: "Đã hủy booking và giải phóng phòng!" });
         } catch (error) {
-            await connection.rollback();
+            await connection.rollback(); 
             res.status(500).json({ error: error.message }); 
         } finally {
-            connection.release();
+            connection.release(); 
         }
     });
 
 // ==========================================
 // --- API QUẢN LÝ NHÂN VIÊN VÀ GIAO VIỆC ---
 // ==========================================
+
+// [BỔ SUNG GET /api/staff - BẮT BUỘC ĐỂ DASHBOARD HOẠT ĐỘNG]
 app.get('/api/staff', async (req, res) => {
     try {
         const sql = `
@@ -398,7 +401,7 @@ app.post('/api/tasks', async (req, res) => {
         await connection.rollback();
         res.status(400).json({ error: error.message });
     } finally {
-        connection.release();
+        connection.release(); 
     }
 });
 
@@ -417,7 +420,7 @@ app.put('/api/tasks/:task_id/complete', async (req, res) => {
         await connection.rollback();
         res.status(400).json({ error: error.message });
     } finally {
-        connection.release();
+        connection.release(); 
     }
 });
 
@@ -476,7 +479,7 @@ app.post('/api/alerts/acknowledge', async (req, res) => {
         await connection.rollback();
         res.status(500).json({ error: error.message });
     } finally {
-        connection.release();
+        connection.release(); 
     }
 });
 
@@ -525,9 +528,9 @@ app.put('/api/alerts/resolve/:room_number/:alert_type', async (req, res) => {
         const roomId = rooms[0].room_id;
 
         let sql = "";
-        if (alert_type === 'Water Leak') sql = `UPDATE room_iot_state SET sprinkler = 0 WHERE room_id = ?`; 
-        else if (alert_type === 'Alarm Active') sql = `UPDATE room_iot_state SET siren = 0, tv = 0 WHERE room_id = ?`; 
-        else if (alert_type === 'Smoke Detected' || alert_type === 'High Temperature') sql = `UPDATE room_iot_state SET siren = 0, fan = 1, curtain = 1, door_lock = 0, door_open = 1 WHERE room_id = ?`;
+        if (alert_type === 'Water Leak') sql = `UPDATE room_iot_state SET sprinkler = 0, updated_at = NOW() WHERE room_id = ?`; 
+        else if (alert_type === 'Alarm Active') sql = `UPDATE room_iot_state SET siren = 0, tv = 0, updated_at = NOW() WHERE room_id = ?`; 
+        else if (alert_type === 'Smoke Detected' || alert_type === 'High Temperature') sql = `UPDATE room_iot_state SET siren = 0, fan = 1, curtain = 1, door_lock = 0, door_open = 1, updated_at = NOW() WHERE room_id = ?`;
 
         if (sql) await pool.query(sql, [roomId]);
 
@@ -582,10 +585,10 @@ app.put('/api/iot/:room_number/control', async (req, res) => {
         
         if (deviceKey === 'door_lock') {
             const doorOpenValue = !value;
-            const sql = `UPDATE room_iot_state SET door_lock = ?, door_open = ? WHERE room_id = ?`;
+            const sql = `UPDATE room_iot_state SET door_lock = ?, door_open = ?, updated_at = NOW() WHERE room_id = ?`;
             await pool.query(sql, [value, doorOpenValue, roomId]);
         } else {
-            const sql = `UPDATE room_iot_state SET ${deviceKey} = ? WHERE room_id = ?`;
+            const sql = `UPDATE room_iot_state SET ${deviceKey} = ?, updated_at = NOW() WHERE room_id = ?`;
             await pool.query(sql, [value, roomId]);
         }
 
@@ -593,14 +596,14 @@ app.put('/api/iot/:room_number/control', async (req, res) => {
         const { brightness } = req.body;
         if (brightness !== undefined && (deviceKey === 'main_light' || deviceKey === 'desk_lamp')) {
             const brightnessCol = deviceKey === 'main_light' ? 'light_brightness' : 'desk_brightness';
-            await pool.query(`UPDATE room_iot_state SET ${brightnessCol} = ? WHERE room_id = ?`, [brightness, roomId]);
+            await pool.query(`UPDATE room_iot_state SET ${brightnessCol} = ?, updated_at = NOW() WHERE room_id = ?`, [brightness, roomId]);
         }
 
         // PHÁT LỆNH MQTT XUỐNG MẠCH THẬT
         const controlTopic = `hotel/room/${req.params.room_number}/control`;
         const payload = JSON.stringify({ 
             device: deviceKey, 
-            state: value,
+            state: value, 
             ...(brightness !== undefined && { brightness }) // gửi brightness nếu có
         });
         mqttClient.publish(controlTopic, payload, { qos: 1 });
@@ -682,7 +685,7 @@ app.get('/api/prediction/:room_number', async (req, res) => {
             ORDER BY predicted_at DESC
             LIMIT 1
         `;
-        const [rows] = await pool.query(sql);
+        const [rows] = await pool.query(sql, [req.params.room_number]);
         if (rows.length === 0) {
             return res.status(404).json({ error: "Chưa có prediction cho phòng này" });
         }
@@ -851,9 +854,6 @@ const runIoTSimulation = async () => {
 
 // ============================================================
 // 🎙️ VOICE COMMAND — LLM-BACKED INTENT PARSING
-// Thiết kế tối giản, có chủ đích: 1 lượt gọi = 1 phân loại intent.
-// Không dùng agent/nhiều bước — không cần thiết cho bài toán này,
-// và sẽ tốn nhiều request LLM hơn (làm rate-limit tệ hơn, không tốt hơn).
 // ============================================================
 
 const VOICE_SYSTEM_PROMPT = `
@@ -873,44 +873,18 @@ const VOICE_SYSTEM_PROMPT = `
       brightness, illumination level, or "how much light" maps to device "light" with type "QUERY".
     - "temperature" or "how hot/cold" maps to device: "temp".
 
-    Examples (follow this pattern for similar but differently-worded questions):
-    - "Is there anyone in the room?" -> { "device": "motion", "action": "QUERY", "type": "QUERY" }
-    - "Is anybody there?" -> { "device": "motion", "action": "QUERY", "type": "QUERY" }
-    - "Is the room empty?" -> { "device": "motion", "action": "QUERY", "type": "QUERY" }
-    - "What is the light?" -> { "device": "light", "action": "QUERY", "type": "QUERY" }
-    - "How bright is it in here?" -> { "device": "light", "action": "QUERY", "type": "QUERY" }
-    - "Turn on the main light" -> { "device": "main_light", "action": "ON", "type": "CONTROL" }
-    - "I'm so cold, turn off the AC" -> { "device": "ac_power", "action": "OFF", "type": "CONTROL" }
-      (the feeling is context, not the command — extract the actual instruction that follows)
-    - "It's too hot in here, can you switch on the air conditioning?" -> { "device": "ac_power", "action": "ON", "type": "CONTROL" }
-    - "I want to relax, can you turn off the main power?" -> { "device": "main_power", "action": "OFF", "type": "CONTROL" }
-      (ignore the unrelated reason clause "I want to relax" — only the device+action matters)
-    - "Can you shut the curtains please?" -> { "device": "curtain", "action": "ON", "type": "CONTROL" }
-    - "Open up the curtains" -> { "device": "curtain", "action": "OFF", "type": "CONTROL" }
-    - "How's the air quality?" -> { "device": "co2", "action": "QUERY", "type": "QUERY" }
-    - "Any smoke detected?" -> { "device": "smoke", "action": "QUERY", "type": "QUERY" }
-    - "What's the power usage so far?" -> { "device": "energy", "action": "QUERY", "type": "QUERY" }
-    - "Lock the door for me" -> { "device": "door_lock", "action": "ON", "type": "CONTROL" }
-    - Compound/casual sentences (reason + request, small talk + request, filler words like
-      "can you", "please", "for me") are common — always extract only the actual device + action,
-      ignore the surrounding reason or politeness wrapper.
-    - If the text has nothing to do with any valid device or sensor (e.g. small talk, unrelated
-      questions), return { "device": "none", "action": "QUERY", "type": "QUERY" }.
-
     Return ONLY a valid JSON object in this format, nothing else:
     { "device": "device_name", "action": "ON/OFF/QUERY", "type": "CONTROL/QUERY" }
 `;
 
-// Cache ngắn hạn cho câu hỏi lặp lại (vd người dùng hỏi lại "what is the temp"
-// vài giây sau) — giảm số request thật gửi lên LLM, đỡ chạm rate limit free tier.
-const voiceCache = new Map(); // key: text đã chuẩn hoá -> { intent, expiresAt }
+const voiceCache = new Map();
 const VOICE_CACHE_TTL_MS = 10_000;
 
 function getCachedIntent(text) {
     const key = text.trim().toLowerCase();
     const hit = voiceCache.get(key);
     if (hit && hit.expiresAt > Date.now()) return hit.intent;
-    if (hit) voiceCache.delete(key); // hết hạn thì dọn luôn
+    if (hit) voiceCache.delete(key);
     return null;
 }
 function setCachedIntent(text, intent) {
@@ -926,7 +900,7 @@ async function callGroq(text) {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            model: 'openai/gpt-oss-20b', // Groq khuyến nghị thay llama3-8b-8192 (đã decommission) — xem console.groq.com/docs/deprecations
+            model: 'openai/gpt-oss-20b',
             messages: [
                 { role: 'system', content: VOICE_SYSTEM_PROMPT },
                 { role: 'user', content: text }
@@ -938,8 +912,6 @@ async function callGroq(text) {
 
     if (!resp.ok) {
         const body = await resp.text().catch(() => '');
-        // Phân biệt rõ 429 (rate limit) với các lỗi khác — để log cho biết chính
-        // xác nguyên nhân thay vì đoán mò.
         const reason = resp.status === 429 ? 'RATE_LIMITED' : `HTTP_${resp.status}`;
         throw new Error(`Groq ${reason}: ${body.slice(0, 200)}`);
     }
@@ -957,7 +929,7 @@ async function callOpenRouter(text) {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            model: 'openrouter/free', // router tự chọn model free đang khả dụng — tránh việc phải tự tay đổi tên model mỗi khi OpenRouter đổi danh sách free (đã gãy 1 lần vì hardcode)
+            model: 'openrouter/free',
             messages: [
                 { role: 'system', content: VOICE_SYSTEM_PROMPT },
                 { role: 'user', content: text }
@@ -976,8 +948,6 @@ async function callOpenRouter(text) {
     return JSON.parse(data.choices[0].message.content);
 }
 
-// Thử Groq trước, hết hạn/lỗi thì thử OpenRouter, cả 2 hỏng thì báo lỗi rõ ràng
-// để route bên dưới trả success:false (app đã có regex fallback xử lý tiếp).
 async function classifyIntent(text) {
     const cached = getCachedIntent(text);
     if (cached) {
@@ -1004,8 +974,6 @@ async function classifyIntent(text) {
     }
 }
 
-// Chọn ngẫu nhiên 1 câu trong danh sách — giúp phản hồi đỡ giống 1 khuôn cố định,
-// không cần gọi thêm LLM (tránh tăng request/rate-limit).
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 app.post('/api/voice/llm-command', async (req, res) => {
@@ -1019,15 +987,11 @@ app.post('/api/voice/llm-command', async (req, res) => {
         try {
             aiIntent = await classifyIntent(text);
         } catch (llmErr) {
-            // Cả Groq lẫn OpenRouter đều lỗi — trả success:false, KHÔNG phải 500,
-            // để app hiểu đây là "LLM tạm thời không dùng được" và tự chuyển sang
-            // regex fallback ở client, thay vì hiện lỗi cứng cho người dùng.
             return res.json({ success: false, message: "Voice service temporarily unavailable." });
         }
 
         const { device, action, type } = aiIntent;
         if (!device || device === "none" || device === "unknown") {
-            // Thay vì từ chối cụt lủn, nói rõ phạm vi hiểu được — đỡ cảm giác "ngố".
             return res.json({
                 success: false,
                 message: "Sorry, I didn't catch that."
@@ -1088,11 +1052,11 @@ app.post('/api/voice/llm-command', async (req, res) => {
 
             if (device === 'door_lock') {
                 await pool.query(
-                    `UPDATE room_iot_state SET door_lock = ?, door_open = ? WHERE room_id = ?`,
+                    `UPDATE room_iot_state SET door_lock = ?, door_open = ?, updated_at = NOW() WHERE room_id = ?`,
                     [boolState, !boolState, roomId]
                 );
             } else {
-                await pool.query(`UPDATE room_iot_state SET ${device} = ? WHERE room_id = ?`, [boolState, roomId]);
+                await pool.query(`UPDATE room_iot_state SET ${device} = ?, updated_at = NOW() WHERE room_id = ?`, [boolState, roomId]);
             }
 
             const controlTopic = `hotel/room/${room_number}/control`;
@@ -1176,8 +1140,6 @@ app.post('/api/sync/rooms', async (req, res) => {
 
 //wake up cho monitor tránh render tắt
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
-//Simulate after 5s
-//setInterval(runIoTSimulation, 5000);
 
 module.exports = app;
 
