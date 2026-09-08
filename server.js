@@ -125,11 +125,17 @@ mqttClient.on('connect', () => {
 mqttClient.on('message', async (topic, message) => {
     try {
         const topicParts = topic.split('/');
-        const roomNumber = topicParts[2]; 
+        const roomNumber = topicParts[2];
+        const actionType = topicParts[3];
         
         if (!REAL_ROOMS.includes(roomNumber)) return;
 
         const sensorData = JSON.parse(message.toString());
+
+
+        if (actionType === 'control' && sensorData.sender === 'pi_local_rest') return;
+     
+        if (actionType !== 'sensors') return;
         const [rooms] = await pool.query("SELECT room_id FROM room WHERE room_number = ?", [roomNumber]);
         if (rooms.length === 0) return;
         const roomId = rooms[0].room_id;
@@ -737,8 +743,8 @@ app.post('/api/sync/rooms', async (req, res) => {
             
             const currentTime = current[0]?.current_time_ms ? Number(current[0].current_time_ms) : 0;
             const incomingTime = updated_at_ms ? Number(updated_at_ms) : (updated_at ? new Date(updated_at).getTime() : 0);
-
-            if (currentTime - incomingTime > 1000) {
+            
+            if (currentTime - incomingTime > 5000) {
                 skipped++;
                 continue;
             }
