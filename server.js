@@ -1122,11 +1122,12 @@ const SYNCABLE_COLUMNS = [
 app.post('/api/sync/rooms', async (req, res) => {
     const { rows } = req.body;
     if (!Array.isArray(rows) || rows.length === 0) {
-        return res.json({ message: "Không có dữ liệu để sync", updated: 0, skipped: 0 });
+        return res.json({ message: "Không có dữ liệu để sync", updated: 0, skipped: 0, cloudRows: [] });
     }
 
     let updated = 0, skipped = 0, notFound = 0;
     try {
+        // 1. CHIỀU ĐI: Cập nhật từ Pi lên Cloud (Last-Write-Wins)
         for (const row of rows) {
             const { room_number, updated_at } = row;
             if (!room_number) { skipped++; continue; }
@@ -1135,7 +1136,6 @@ app.post('/api/sync/rooms', async (req, res) => {
             if (rooms.length === 0) { notFound++; continue; }
             const roomId = rooms[0].room_id;
 
-            // Kiểm tra Last-Write-Wins dựa trên timestamp
             const [current] = await pool.query("SELECT updated_at FROM room_iot_state WHERE room_id = ?", [roomId]);
             const currentTime = current[0]?.updated_at ? new Date(current[0].updated_at) : new Date(0);
             const incomingTime = updated_at ? new Date(updated_at) : new Date();
@@ -1158,7 +1158,23 @@ app.post('/api/sync/rooms', async (req, res) => {
             );
             updated++;
         }
-        res.json({ message: "Sync xong", updated, skipped, notFound });
+
+        // 2. CHIỀU VỀ: Lấy toàn bộ trạng thái mới nhất trên Cloud trả về cho Pi
+        const [cloudRows] = await pool.query(`
+            SELECT r.room_number, i.* 
+            FROM room_iot_state i 
+            JOIN room r ON i.room_id = r.room_id
+        `);
+
+        // Trả kết quả kèm cloudRows
+        res.json({ 
+            message: "Sync xong", 
+            updated, 
+            skipped, 
+            notFound,
+            cloudRows 
+        });
+
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
