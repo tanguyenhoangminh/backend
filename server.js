@@ -1,6 +1,6 @@
 const express = require('express');
-const http = require('http'); // [SOCKET.IO] Thêm module http
-const { Server } = require('socket.io'); // [SOCKET.IO] Thư viện WebSocket
+const http = require('http'); // [SOCKET.IO]
+const { Server } = require('socket.io'); // [SOCKET.IO]
 const cors = require('cors');
 const mysql = require('mysql2/promise');
 const mqtt = require('mqtt'); // Thư viện MQTT
@@ -14,26 +14,22 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// [SOCKET.IO] Khởi tạo HTTP Server & cấu hình Socket.io
+// [SOCKET.IO] Khởi tạo HTTP Server & gắn WebSocket
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: "*", // Cho phép mọi Client (Vercel, localhost, Expo app) kết nối
+        origin: "*",
         methods: ["GET", "POST", "PUT"]
     }
 });
 
 io.on('connection', (socket) => {
     console.log(`🔌 Client kết nối Socket.io: ${socket.id}`);
-
-    // Client đăng ký vào room theo số phòng (ví dụ: '0101')
     socket.on('join_room', (roomNumber) => {
         socket.join(`room_${roomNumber}`);
-        console.log(`📌 Socket [${socket.id}] đã tham gia phòng: room_${roomNumber}`);
     });
-
     socket.on('disconnect', () => {
-        console.log(`❌ Client ngắt kết nối Socket: ${socket.id}`);
+        console.log(`❌ Client ngắt kết nối: ${socket.id}`);
     });
 });
 
@@ -49,12 +45,10 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// Thêm cột brightness nếu chưa có (safe migration)
+// Thêm cột nếu chưa có (safe migration)
 pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS main_brightness INT DEFAULT 100`).catch(() => {});
 pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS desk_brightness INT DEFAULT 100`).catch(() => {});
 pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS light_brightness TINYINT UNSIGNED DEFAULT 100`).catch(() => {});
-
-// Cột updated_at cho State Reconciliation
 pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`).catch(() => {});
 
 pool.query(`
@@ -64,7 +58,7 @@ pool.query(`
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (room_number, alert_type)
     )
-`).then(() => console.log("✅ Alert table checked!"))
+`).then(() => console.log("✅ Alert table ready!"))
   .catch(err => console.error("Alert_acks_error:", err));
 
 pool.query(`
@@ -106,7 +100,7 @@ pool.query(`
 // ==========================================
 // MQTT CLOUD (HIVEMQ TLS)
 // ==========================================
-const REAL_ROOMS = ['0101', '0102']; 
+const REAL_ROOMS = ['0101', '0102', '101', '102']; 
 
 const MQTT_BROKER = `mqtts://${process.env.MQTT_HOST || '9285fd3c13654137ab1f1c4d1fbf39ae.s1.eu.hivemq.cloud'}:${process.env.MQTT_PORT || 8883}`;
 
@@ -123,7 +117,7 @@ const mqttClient = mqtt.connect(MQTT_BROKER, MQTT_OPTIONS);
 mqttClient.on('connect', () => {
     console.log("☁️ Đã kết nối MQTT với HiveMQ Cloud!");
     mqttClient.subscribe('hotel/room/+/sensors', (err) => {
-        if (!err) console.log("📡 Đang lắng nghe dữ liệu cảm biến từ HiveMQ qua cổng 8883...");
+        if (!err) console.log("📡 Đang lắng nghe dữ liệu cảm biến từ HiveMQ...");
     });
 });
 
@@ -162,7 +156,7 @@ mqttClient.on('message', async (topic, message) => {
                 values
             );
 
-            // [SOCKET.IO] Bắn dữ liệu cảm biến mới nhất tức thì cho Frontend
+            // Bắn realtime cho Frontend
             const payload = { room_number: roomNumber, ...sensorData };
             io.to(`room_${roomNumber}`).emit('room_state_changed', payload);
             io.emit('room_update_global', payload);
@@ -173,7 +167,7 @@ mqttClient.on('message', async (topic, message) => {
 });
 
 // ==========================================
-// --- API QUẢN LÝ PHÒNG & GUEST & BOOKINGS & STAFF ---
+// --- API QUẢN LÝ PHÒNG & GUEST & BOOKINGS ---
 // ==========================================
 app.route('/api/rooms')
     .get(async (req, res) => {
@@ -556,7 +550,6 @@ app.get('/api/iot/:room_number', async (req, res) => {
     }
 });
 
-// [SOCKET.IO] Điều khiển thiết bị và phát Socket Realtime ngay lập tức
 app.put('/api/iot/:room_number/control', async (req, res) => {
     const { deviceKey, value, brightness } = req.body; 
     try {
@@ -580,7 +573,7 @@ app.put('/api/iot/:room_number/control', async (req, res) => {
             await pool.query(`UPDATE room_iot_state SET ${brightnessCol} = ?, updated_at = NOW() WHERE room_id = ?`, [brightness, roomId]);
         }
 
-        // PHÁT LỆNH MQTT XUỐNG MẠCH THẬT QUA HIVEMQ
+        // Phát MQTT cho Mosquitto Bridge dội xuống Pi
         const controlTopic = `hotel/room/${req.params.room_number}/control`;
         const payload = JSON.stringify({ 
             sender: 'cloud_render',
@@ -590,7 +583,7 @@ app.put('/api/iot/:room_number/control', async (req, res) => {
         });
         mqttClient.publish(controlTopic, payload, { qos: 1 });
 
-        // [SOCKET.IO] Bắn cập nhật trạng thái thiết bị tức thì cho tất cả Client
+        // Bắn Socket.io tức thì cho tất cả Client đang mở Web
         const updatedData = {
             room_number: req.params.room_number,
             [deviceKey]: valNum,
@@ -767,14 +760,16 @@ app.post('/api/sync/rooms', async (req, res) => {
             );
             updated++;
 
-            // [SOCKET.IO] Bắn cập nhật qua WebSocket ngay khi Pi sync lên
+            // Bắn WebSocket cập nhật cho Frontend
             io.to(`room_${room_number}`).emit('room_state_changed', row);
         }
 
+        // Lấy lại danh sách để trả về cho Pi (Loại trừ phòng thật để không bao giờ ghi đè Pi)
         const [cloudRows] = await pool.query(`
             SELECT r.room_number, i.* 
             FROM room_iot_state i 
             JOIN room r ON i.room_id = r.room_id
+            WHERE r.room_number NOT IN ('0101', '0102', '101', '102')
         `);
 
         res.json({ message: "Sync xong", updated, skipped, cloudRows });
@@ -800,8 +795,9 @@ const runIoTSimulation = async () => {
         const [rooms] = await pool.query(sql);
         
         for (let room of rooms) {
-            // Không chạy giả lập trên phòng thật
-            if (REAL_ROOMS.includes(room.room_number)) continue;
+            const rNum = String(room.room_number).trim();
+            // Tuyệt đối không chạm vào phòng thật
+            if (REAL_ROOMS.includes(rNum) || rNum === '0101' || rNum === '101') continue;
 
             let currentEnergy = Number(room.energy) || 0;
             let energyCost = 0; 
@@ -891,8 +887,6 @@ const runIoTSimulation = async () => {
         console.error("Lỗi mô phỏng IoT:", error);
     }
 };
-
-//setInterval(runIoTSimulation, 5000);
 
 // ============================================================
 // 🎙️ VOICE COMMAND — LLM-BACKED INTENT PARSING
@@ -1072,7 +1066,7 @@ app.post('/api/voice/llm-command', async (req, res) => {
             const controlTopic = `hotel/room/${room_number}/control`;
             mqttClient.publish(controlTopic, JSON.stringify({ sender: 'cloud_render', device, state: boolState }), { qos: 1 });
 
-            // [SOCKET.IO] Bắn cập nhật cho Client khi điều khiển bằng giọng nói
+            // Bắn Socket.io cập nhật
             const voiceUpdate = {
                 room_number,
                 [device]: boolState ? 1 : 0,
@@ -1095,11 +1089,14 @@ app.post('/api/voice/llm-command', async (req, res) => {
 // Endpoint giữ sống dịch vụ cho UptimeRobot / Cron monitor
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+// ============================================================
+// ============================================================
+// setInterval(runIoTSimulation, 5000);
+
 module.exports = app;
 
 if (require.main === module) {
     const PORT = process.env.PORT || 5000;
-    // [QUAN TRỌNG] Sử dụng server.listen thay vì app.listen để kích hoạt Socket.io
     server.listen(PORT, () => {
         console.log(`🚀 API Hotel Server chạy tại port ${PORT}`);
     });
