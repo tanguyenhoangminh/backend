@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
-const mqtt = require('mqtt'); // Thư viện MQTT
+const mqtt = require('mqtt'); //Thư viện MQTT
 require('dotenv').config(); 
 
 // Voice NLU 
@@ -25,12 +25,10 @@ const pool = mysql.createPool({
 });
 
 // Thêm cột brightness nếu chưa có (safe migration)
-pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS main_brightness INT DEFAULT 100`).catch(() => {});
-pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS desk_brightness INT DEFAULT 100`).catch(() => {});
-pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS light_brightness TINYINT UNSIGNED DEFAULT 100`).catch(() => {});
-
-// Cột updated_at cho State Reconciliation
-pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`).catch(() => {});
+pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS main_brightness INT DEFAULT 100`)
+  .catch(() => {}); // ignore nếu đã có
+pool.query(`ALTER TABLE room_iot_state ADD COLUMN IF NOT EXISTS desk_brightness INT DEFAULT 100`)
+  .catch(() => {}); // ignore nếu đã có
 
 pool.query(`
     CREATE TABLE IF NOT EXISTS alert_acks (
@@ -39,8 +37,9 @@ pool.query(`
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (room_number, alert_type)
     )
-`).then(() => console.log("✅ Alert table ready!"))
+`).then(() => console.log("✅ Succesfull!"))
   .catch(err => console.error("Alert_acks_error:", err));
+
 
 pool.query(`
     CREATE TABLE IF NOT EXISTS edge_gateway (
@@ -52,9 +51,11 @@ pool.query(`
     )
 `).catch(err => console.error("edge_gateway_error:", err));
 
+
+// (predicted_occupied/probability) thay vì predicted_temp
 pool.query(`
     CREATE TABLE IF NOT EXISTS ai_prediction (
-        prediction_id       BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        prediction_id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         room_number         VARCHAR(10) NOT NULL,
         model_name          VARCHAR(50),
         model_version       VARCHAR(20),
@@ -78,20 +79,22 @@ pool.query(`
     )
 `).catch(err => console.error("perf_metric_error:", err));
 
+let roomSensorCache = {};
+
 // ==========================================
-// (HYBRID) & MQTT LOCAL / CLOUD
+// (HYBRID) & MQTT LOCAL
 // ==========================================
-const REAL_ROOMS = ['0101', '0102', '101', '102']; 
+const REAL_ROOMS = ['0101', '0102']; // các phòng xài mạch thật --> mở rộng các phòng từ '0103',..... bằng cách add vào đây
 
 // HiveMQ Cloud broker (TLS) — đọc từ env vars
 const MQTT_BROKER = `mqtts://${process.env.MQTT_HOST || '9285fd3c13654137ab1f1c4d1fbf39ae.s1.eu.hivemq.cloud'}:${process.env.MQTT_PORT || 8883}`;
 
 const MQTT_OPTIONS = {
-    clientId: 'hotel_backend_render_' + Math.random().toString(16).substring(2, 8),
+    clientId: 'hotel_backend_' + Math.random().toString(16).substring(2, 8),
     username: process.env.MQTT_USERNAME,
     password: process.env.MQTT_PASSWORD,
-    protocol: 'mqtts',
-    rejectUnauthorized: true
+    protocol: 'mqtts',       // bắt buộc TLS
+    rejectUnauthorized: true  // HiveMQ Cloud dùng cert hợp lệ, không cần tắt
 };
 
 const mqttClient = mqtt.connect(MQTT_BROKER, MQTT_OPTIONS);
@@ -108,6 +111,7 @@ mqttClient.on('message', async (topic, message) => {
         const topicParts = topic.split('/');
         const roomNumber = topicParts[2]; 
         
+       
         if (!REAL_ROOMS.includes(roomNumber)) return;
 
         const sensorData = JSON.parse(message.toString());
@@ -116,19 +120,22 @@ mqttClient.on('message', async (topic, message) => {
         if (rooms.length === 0) return;
         const roomId = rooms[0].room_id;
 
+        // Cập nhật sensor + actuator state từ ESP8266
+        // Chỉ update field nào ESP gửi lên, field nào null thì giữ nguyên DB
         const fields = [];
         const values = [];
 
-        if (sensorData.temp !== undefined) { fields.push('temp=?'); values.push(sensorData.temp); }
-        if (sensorData.humidity !== undefined) { fields.push('humidity=?'); values.push(sensorData.humidity); }
-        if (sensorData.co2 !== undefined) { fields.push('co2=?'); values.push(sensorData.co2); }
-        if (sensorData.noise !== undefined) { fields.push('noise=?'); values.push(sensorData.noise); }
-        if (sensorData.light !== undefined) { fields.push('light=?'); values.push(sensorData.light); }
-        if (sensorData.motion !== undefined) { fields.push('motion=?'); values.push(sensorData.motion); }
-        if (sensorData.smoke !== undefined) { fields.push('smoke=?'); values.push(sensorData.smoke); }
-        if (sensorData.smoke_alert !== undefined) { fields.push('siren=?'); values.push(sensorData.smoke_alert); }
-        if (sensorData.main_light !== undefined) { fields.push('main_light=?'); values.push(sensorData.main_light); }
-        if (sensorData.desk_lamp !== undefined) { fields.push('desk_lamp=?'); values.push(sensorData.desk_lamp); }
+        if (sensorData.temp      !== undefined) { fields.push('temp=?');      values.push(sensorData.temp); }
+        if (sensorData.humidity  !== undefined) { fields.push('humidity=?');  values.push(sensorData.humidity); }
+        if (sensorData.co2       !== undefined) { fields.push('co2=?');       values.push(sensorData.co2); }
+        if (sensorData.noise     !== undefined) { fields.push('noise=?');     values.push(sensorData.noise); }
+        if (sensorData.light     !== undefined) { fields.push('light=?');     values.push(sensorData.light); }
+        if (sensorData.motion    !== undefined) { fields.push('motion=?');    values.push(sensorData.motion); }
+        if (sensorData.smoke     !== undefined) { fields.push('smoke=?');     values.push(sensorData.smoke); }
+        if (sensorData.smoke_alert !== undefined) { fields.push('siren=?');   values.push(sensorData.smoke_alert); }
+        // Brightness từ Node 2
+        if (sensorData.main_light      !== undefined) { fields.push('main_light=?');      values.push(sensorData.main_light); }
+        if (sensorData.desk_lamp       !== undefined) { fields.push('desk_lamp=?');       values.push(sensorData.desk_lamp); }
         if (sensorData.main_brightness !== undefined) { fields.push('main_brightness=?'); values.push(sensorData.main_brightness); }
         if (sensorData.desk_brightness !== undefined) { fields.push('desk_brightness=?'); values.push(sensorData.desk_brightness); }
 
@@ -139,10 +146,12 @@ mqttClient.on('message', async (topic, message) => {
                 values
             );
         }
+        
     } catch (error) {
         console.error("Lỗi xử lý tin nhắn MQTT:", error);
     }
 });
+
 
 // ==========================================
 // --- API QUẢN LÝ PHÒNG (ROOMS) ---
@@ -321,7 +330,7 @@ app.route('/api/bookings/:id')
     .delete(async (req, res) => {
         const connection = await pool.getConnection();
         try {
-            await connection.beginTransaction(); 
+            await connection.beginTransaction();
             const [booking] = await connection.query("SELECT room_id FROM booking WHERE booking_id = ?", [req.params.id]);
             if (booking.length > 0) {
                 await connection.query("UPDATE room SET status = 'available' WHERE room_id = ?", [booking[0].room_id]);
@@ -330,10 +339,10 @@ app.route('/api/bookings/:id')
             await connection.commit();
             res.json({ message: "Đã hủy booking và giải phóng phòng!" });
         } catch (error) {
-            await connection.rollback(); 
+            await connection.rollback();
             res.status(500).json({ error: error.message }); 
         } finally {
-            connection.release(); 
+            connection.release();
         }
     });
 
@@ -385,7 +394,7 @@ app.post('/api/tasks', async (req, res) => {
         await connection.rollback();
         res.status(400).json({ error: error.message });
     } finally {
-        connection.release(); 
+        connection.release();
     }
 });
 
@@ -404,7 +413,7 @@ app.put('/api/tasks/:task_id/complete', async (req, res) => {
         await connection.rollback();
         res.status(400).json({ error: error.message });
     } finally {
-        connection.release(); 
+        connection.release();
     }
 });
 
@@ -444,6 +453,7 @@ app.delete('/api/staff/:id', async (req, res) => {
 // ==========================================
 // --- API HỆ THỐNG CẢNH BÁO (ALERTS SYSTEM) ---
 // ==========================================
+
 app.post('/api/alerts/acknowledge', async (req, res) => {
     const { alertsToAck } = req.body; 
     if (!alertsToAck || alertsToAck.length === 0) return res.json({ message: "Không có alert nào" });
@@ -452,6 +462,7 @@ app.post('/api/alerts/acknowledge', async (req, res) => {
     try {
         await connection.beginTransaction();
         for (let alert of alertsToAck) {
+            // Dùng INSERT IGNORE để không bị lỗi nếu Admin bấm nhiều lần
             const sql = `INSERT IGNORE INTO alert_acks (room_number, alert_type) VALUES (?, ?)`;
             await connection.query(sql, [alert.room_number, alert.type]);
         }
@@ -461,7 +472,7 @@ app.post('/api/alerts/acknowledge', async (req, res) => {
         await connection.rollback();
         res.status(500).json({ error: error.message });
     } finally {
-        connection.release(); 
+        connection.release();
     }
 });
 
@@ -474,6 +485,7 @@ app.get('/api/alerts', async (req, res) => {
         `;
         const [rooms] = await pool.query(sql);
 
+        // Lấy danh sách đã Acknowledge từ DB
         const [acks] = await pool.query("SELECT * FROM alert_acks");
         const ackSet = new Set(acks.map(a => `${a.room_number}-${a.alert_type}`));
 
@@ -485,7 +497,7 @@ app.get('/api/alerts', async (req, res) => {
                 id: idCounter++, room_id: room.room_id, room_number: room.room_number, 
                 floor: room.floor_number, type, message, severity, status: 'Active', 
                 value, sensor, time: 'Just now', 
-                is_acknowledged: ackSet.has(`${room.room_number}-${type}`)
+                is_acknowledged: ackSet.has(`${room.room_number}-${type}`) // Gắn cờ true/false
             });
         };
 
@@ -514,6 +526,8 @@ app.put('/api/alerts/resolve/:room_number/:alert_type', async (req, res) => {
         else if (alert_type === 'Smoke Detected' || alert_type === 'High Temperature') sql = `UPDATE room_iot_state SET siren = 0, fan = 1, curtain = 1, door_lock = 0, door_open = 1 WHERE room_id = ?`;
 
         if (sql) await pool.query(sql, [roomId]);
+
+    
         await pool.query("DELETE FROM alert_acks WHERE room_number = ? AND alert_type = ?", [room_number, alert_type]);
 
         res.json({ message: "Action taken! Actuators resetting." });
@@ -525,6 +539,7 @@ app.put('/api/alerts/resolve/:room_number/:alert_type', async (req, res) => {
 // ==========================================
 // --- API THIẾT BỊ VÀ ĐIỀU KHIỂN IOT ---
 // ==========================================
+
 app.get('/api/iot/all', async (req, res) => {
     try {
         const [rows] = await pool.query(`
@@ -560,30 +575,29 @@ app.put('/api/iot/:room_number/control', async (req, res) => {
         if (rooms.length === 0) return res.status(404).json({ error: "Không tìm thấy phòng" });
         
         const roomId = rooms[0].room_id;
-        const valNum = (value === true || value === 1 || value === '1') ? 1 : 0;
         
         if (deviceKey === 'door_lock') {
-            const doorOpenValue = !valNum;
-            const sql = `UPDATE room_iot_state SET door_lock = ?, door_open = ?, updated_at = NOW() WHERE room_id = ?`;
-            await pool.query(sql, [valNum, doorOpenValue, roomId]);
+            const doorOpenValue = !value;
+            const sql = `UPDATE room_iot_state SET door_lock = ?, door_open = ? WHERE room_id = ?`;
+            await pool.query(sql, [value, doorOpenValue, roomId]);
         } else {
-            const sql = `UPDATE room_iot_state SET ${deviceKey} = ?, updated_at = NOW() WHERE room_id = ?`;
-            await pool.query(sql, [valNum, roomId]);
+            const sql = `UPDATE room_iot_state SET ${deviceKey} = ? WHERE room_id = ?`;
+            await pool.query(sql, [value, roomId]);
         }
 
+        // Nếu có brightness thì lưu luôn
         const { brightness } = req.body;
         if (brightness !== undefined && (deviceKey === 'main_light' || deviceKey === 'desk_lamp')) {
             const brightnessCol = deviceKey === 'main_light' ? 'light_brightness' : 'desk_brightness';
-            await pool.query(`UPDATE room_iot_state SET ${brightnessCol} = ?, updated_at = NOW() WHERE room_id = ?`, [brightness, roomId]);
+            await pool.query(`UPDATE room_iot_state SET ${brightnessCol} = ? WHERE room_id = ?`, [brightness, roomId]);
         }
 
-        // PHÁT LỆNH MQTT XUỐNG MẠCH THẬT (KÈM SENDER ĐỂ TRÁNH VÒNG LẶP)
+        // PHÁT LỆNH MQTT XUỐNG MẠCH THẬT
         const controlTopic = `hotel/room/${req.params.room_number}/control`;
         const payload = JSON.stringify({ 
-            sender: 'cloud_render',
             device: deviceKey, 
-            state: valNum,
-            ...(brightness !== undefined && { brightness })
+            state: value,
+            ...(brightness !== undefined && { brightness }) // gửi brightness nếu có
         });
         mqttClient.publish(controlTopic, payload, { qos: 1 });
 
@@ -594,8 +608,11 @@ app.put('/api/iot/:room_number/control', async (req, res) => {
 });
 
 // ==========================================
-// --- API CHO EDGE AI AGENT ---
+// [MỚI THÊM] --- API CHO EDGE AI AGENT ---
 // ==========================================
+
+// Snapshot toàn bộ sensor hiện tại của tất cả phòng — dùng field name
+// khớp CHÍNH XÁC với FEATURES trong train.py / generate_data.py
 app.get('/api/sensors/snapshot', async (req, res) => {
     try {
         const sql = `
@@ -611,6 +628,7 @@ app.get('/api/sensors/snapshot', async (req, res) => {
     }
 });
 
+// Nhận kết quả prediction từ edge_agent.py
 app.post('/api/prediction', async (req, res) => {
     const {
         room_number, model_name, model_version,
@@ -629,6 +647,7 @@ app.post('/api/prediction', async (req, res) => {
     }
 });
 
+//Lấy prediction MỚI NHẤT của TẤT CẢ phòng — dùng cho Dashboard/RoomsScreen
 app.get('/api/prediction/latest', async (req, res) => {
     try {
         const sql = `
@@ -648,6 +667,7 @@ app.get('/api/prediction/latest', async (req, res) => {
     }
 });
 
+// [MỚI THÊM] Lấy prediction MỚI NHẤT của 1 phòng cụ thể — dùng cho RoomDetailScreen
 app.get('/api/prediction/:room_number', async (req, res) => {
     try {
         const sql = `
@@ -668,6 +688,7 @@ app.get('/api/prediction/:room_number', async (req, res) => {
     }
 });
 
+// Nhận log performance (latency, số lượng prediction/cycle...) từ edge_agent.py
 app.post('/api/perf', async (req, res) => {
     const { component, gateway_id, metric_name, metric_value, unit } = req.body;
     try {
@@ -682,6 +703,7 @@ app.post('/api/perf', async (req, res) => {
     }
 });
 
+// Heartbeat từ edge gateway (Raspberry Pi / simulator)
 app.put('/api/gateways/:id/heartbeat', async (req, res) => {
     const t0 = Date.now();
     try {
@@ -693,87 +715,6 @@ app.put('/api/gateways/:id/heartbeat', async (req, res) => {
         );
         res.json({ message: "Heartbeat OK", latency_ms: Date.now() - t0 });
     } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ==========================================
-// [CHUẨN HÓA] STATE RECONCILIATION: ĐỒNG BỘ THEO room_number
-// ==========================================
-const SYNCABLE_COLUMNS = [
-    'temp', 'humidity', 'co2', 'noise', 'light', 'motion', 'smoke', 'siren',
-    'main_light', 'desk_lamp', 'bedside_lamp', 'tv', 'ac_power', 'ac_temp',
-    'fan', 'sprinkler', 'curtain', 'door_open', 'door_lock', 'main_power',
-    'energy', 'leak_detected', 'light_brightness', 'main_brightness', 'desk_brightness'
-];
-
-app.post('/api/sync/rooms', async (req, res) => {
-    const { rows } = req.body;
-    if (!Array.isArray(rows) || rows.length === 0) {
-        return res.json({ message: "Không có dữ liệu để sync", updated: 0, skipped: 0, cloudRows: [] });
-    }
-
-    let updated = 0, skipped = 0;
-    try {
-        for (const row of rows) {
-            const { room_number, updated_at_ms, updated_at } = row;
-            if (!room_number) { skipped++; continue; }
-
-            // 1. LOOKUP room_id NỘI BỘ TRÊN RENDER QUA room_number
-            const [rooms] = await pool.query(
-                "SELECT room_id FROM room WHERE room_number = ?", 
-                [room_number]
-            );
-            if (rooms.length === 0) { skipped++; continue; }
-            const localCloudRoomId = rooms[0].room_id;
-
-            // 2. Lấy timestamp miligiây của MySQL Cloud
-            const [current] = await pool.query(
-                "SELECT UNIX_TIMESTAMP(updated_at) * 1000 AS current_time_ms FROM room_iot_state WHERE room_id = ?", 
-                [localCloudRoomId]
-            );
-            
-            const currentTime = current[0]?.current_time_ms ? Number(current[0].current_time_ms) : 0;
-            const incomingTime = updated_at_ms ? Number(updated_at_ms) : (updated_at ? new Date(updated_at).getTime() : 0);
-
-            // Nếu dữ liệu trên Render mới hơn Pi trên 1 giây -> không ghi đè
-            if (currentTime - incomingTime > 1000) {
-                skipped++;
-                continue;
-            }
-
-            // 3. Lọc các cột (loại bỏ room_id của Pi để không đè sai khóa ngoại)
-            const cols = Object.keys(row).filter(c => 
-                SYNCABLE_COLUMNS.includes(c) && 
-                row[c] !== undefined && 
-                row[c] !== null &&
-                c !== 'room_id'
-            );
-            if (cols.length === 0) { skipped++; continue; }
-
-            const setClause = cols.map(c => `${c} = ?`).join(', ');
-            const values = cols.map(c => row[c]);
-            
-            values.push(new Date(incomingTime), localCloudRoomId);
-
-            await pool.query(
-                `UPDATE room_iot_state SET ${setClause}, updated_at = ? WHERE room_id = ?`,
-                values
-            );
-            updated++;
-        }
-
-        // 4. Trả về các phòng ảo để Pi kéo về (LOẠI TRỪ PHÒNG THẬT 0101, 0102)
-        const [cloudRows] = await pool.query(`
-            SELECT r.room_number, i.* 
-            FROM room_iot_state i 
-            JOIN room r ON i.room_id = r.room_id
-            WHERE r.room_number NOT IN ('0101', '0102', '101', '102')
-        `);
-
-        res.json({ message: "Sync xong", updated, skipped, cloudRows });
-    } catch (error) {
-        console.error("Lỗi sync tại Render:", error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -794,11 +735,7 @@ const runIoTSimulation = async () => {
         const [rooms] = await pool.query(sql);
         
         for (let room of rooms) {
-            const rNum = String(room.room_number).trim();
-            const isRealRoom = REAL_ROOMS.includes(rNum) || rNum === '0101' || rNum === '101';
-
-            // KHÔNG can thiệp vào phòng thật
-            if (isRealRoom) continue;
+            const isRealRoom = REAL_ROOMS.includes(room.room_number);
 
             let currentEnergy = Number(room.energy) || 0;
             let energyCost = 0; 
@@ -810,6 +747,7 @@ const runIoTSimulation = async () => {
             let targetLight = 5.0;      
             let targetNoise = 30.0;      
 
+            // --- [FIX LỖI KHÓI] ---
             let currentSmoke = Number(room.smoke) || 0;
             if (Math.random() < 0.03) {
                 currentSmoke += randomNoise(15, 30); 
@@ -821,7 +759,7 @@ const runIoTSimulation = async () => {
                 if (room.main_light) { 
                     const mainBri = (Number(room.light_brightness) || 100) / 100;
                     targetLight += 300 * mainBri; 
-                    energyCost += 0.01 * mainBri;
+                    energyCost += 0.01 * mainBri;  // dim → tốn ít điện hơn
                 }
                 if (room.desk_lamp) { 
                     const deskBri = (Number(room.desk_brightness) || 100) / 100;
@@ -855,26 +793,42 @@ const runIoTSimulation = async () => {
             if (room.door_open) { targetCo2 = 400; smokeClearRate += 15; }
             if (room.motion) { targetCo2 += 150; targetTemp += 0.5; }
 
+            // XỬ LÝ KHÓI TÍCH TỤ
             let newSmoke = currentSmoke - smokeClearRate;
             newSmoke = Math.max(0, newSmoke); 
             if (newSmoke > 0) newSmoke += randomNoise(-0.2, 0.2); 
 
+            // [AUTO-ALARM] 
             if (newSmoke > 50 && !currentSiren && room.main_power) {
                 currentSiren = true;
             }
             if (currentSiren) { targetNoise = 100; energyCost += 0.01; }
 
-            let newTemp = clamp((Number(room.temp) || 25) + (targetTemp - (Number(room.temp) || 25)) * 0.5 + randomNoise(-0.1, 0.1), 16, 45);
-            let newHumidity = clamp((Number(room.humidity) || 60) + (targetHumidity - (Number(room.humidity) || 60)) * 0.6 + randomNoise(-0.5, 0.5), 20, 100);
-            let newLight = clamp(targetLight + randomNoise(-2, 2), 0, 1500);
-            let newMotion = Math.random() < 0.05 ? !room.motion : room.motion;
+            // ==========================================================
+            //LOGIC CHẶN CẬP NHẬT ẢO CHO PHÒNG THẬT
+            // ==========================================================
+            let newTemp = Number(room.temp) || 25;
+            let newHumidity = Number(room.humidity) || 60;
+            let newLight = Number(room.light) || 300;
+            let newMotion = room.motion || false;
+
+            //CHỈ KHI LÀ PHÒNG ẢO (KHÔNG LẮP MẠCH) THÌ MỚI CHẠY RANDOM 4 SENSOR NÀY
+            // Dùng || để fallback về giá trị mặc định khi DB trả NULL (phòng mới, chưa có data)
+            if (!isRealRoom) {
+                newTemp = clamp((Number(room.temp) || 25) + (targetTemp - (Number(room.temp) || 25)) * 0.5 + randomNoise(-0.1, 0.1), 16, 45);
+                newHumidity = clamp((Number(room.humidity) || 60) + (targetHumidity - (Number(room.humidity) || 60)) * 0.6 + randomNoise(-0.5, 0.5), 20, 100);
+                newLight = clamp(targetLight + randomNoise(-2, 2), 0, 1500);
+                newMotion = Math.random() < 0.05 ? !room.motion : room.motion;
+            }
 
             let newCo2 = clamp((Number(room.co2) || 450) + (targetCo2 - (Number(room.co2) || 450)) * 0.7 + randomNoise(-2, 2), 300, 2000);
             let newNoise = clamp(targetNoise + randomNoise(-1, 1), 20, 130);
             
+            // LOGIC RIÊNG: LEAKING VÀ ENERGY CỘNG DỒN
             let newEnergy = currentEnergy + energyCost;
             let leakDetected = newHumidity > 98;
 
+            // LƯU XUỐNG DB
             const sqlUpdate = `
                 UPDATE room_iot_state 
                 SET temp=?, humidity=?, smoke=?, co2=?, light=?, noise=?, motion=?, energy=?, leak_detected=?, siren=?
@@ -893,22 +847,66 @@ const runIoTSimulation = async () => {
 
 // ============================================================
 // 🎙️ VOICE COMMAND — LLM-BACKED INTENT PARSING
+// Thiết kế tối giản, có chủ đích: 1 lượt gọi = 1 phân loại intent.
+// Không dùng agent/nhiều bước — không cần thiết cho bài toán này,
+// và sẽ tốn nhiều request LLM hơn (làm rate-limit tệ hơn, không tốt hơn).
 // ============================================================
+
 const VOICE_SYSTEM_PROMPT = `
     You are a smart hotel room assistant. Extract intent from the user's text and return a strict JSON object.
+
     Valid Devices: main_light, bedside_lamp, desk_lamp, curtain, fan, ac_power, door_lock, tv, siren, sprinkler, main_power, temp, humidity, light, motion, smoke, energy, co2, noise, leak.
+
+    Rules:
+    - If user asks to turn on/off/open/close/lock/unlock, action is "ON" or "OFF", type is "CONTROL".
+    - If user asks a question (e.g. "what is the temp", "is there anyone", "how loud", "status"), action is "QUERY", type is "QUERY".
+    - "motion" is the occupancy sensor (someone physically present right now). Map ANY phrasing that asks
+      whether a person is in the room to device "motion" — e.g. "anyone", "someone", "somebody", "occupied",
+      "empty room" all mean the same thing as "motion", regardless of exact wording.
+    - "light" is the ambient light sensor, measured in lux (how bright the room is) — NOT a light fixture.
+      "main_light" / "bedside_lamp" / "desk_lamp" are the physical light fixtures that can be turned on/off.
+      Only use "main_light" etc. when the user clearly means turning a lamp on or off. Any question about
+      brightness, illumination level, or "how much light" maps to device "light" with type "QUERY".
+    - "temperature" or "how hot/cold" maps to device: "temp".
+
+    Examples (follow this pattern for similar but differently-worded questions):
+    - "Is there anyone in the room?" -> { "device": "motion", "action": "QUERY", "type": "QUERY" }
+    - "Is anybody there?" -> { "device": "motion", "action": "QUERY", "type": "QUERY" }
+    - "Is the room empty?" -> { "device": "motion", "action": "QUERY", "type": "QUERY" }
+    - "What is the light?" -> { "device": "light", "action": "QUERY", "type": "QUERY" }
+    - "How bright is it in here?" -> { "device": "light", "action": "QUERY", "type": "QUERY" }
+    - "Turn on the main light" -> { "device": "main_light", "action": "ON", "type": "CONTROL" }
+    - "I'm so cold, turn off the AC" -> { "device": "ac_power", "action": "OFF", "type": "CONTROL" }
+      (the feeling is context, not the command — extract the actual instruction that follows)
+    - "It's too hot in here, can you switch on the air conditioning?" -> { "device": "ac_power", "action": "ON", "type": "CONTROL" }
+    - "I want to relax, can you turn off the main power?" -> { "device": "main_power", "action": "OFF", "type": "CONTROL" }
+      (ignore the unrelated reason clause "I want to relax" — only the device+action matters)
+    - "Can you shut the curtains please?" -> { "device": "curtain", "action": "ON", "type": "CONTROL" }
+    - "Open up the curtains" -> { "device": "curtain", "action": "OFF", "type": "CONTROL" }
+    - "How's the air quality?" -> { "device": "co2", "action": "QUERY", "type": "QUERY" }
+    - "Any smoke detected?" -> { "device": "smoke", "action": "QUERY", "type": "QUERY" }
+    - "What's the power usage so far?" -> { "device": "energy", "action": "QUERY", "type": "QUERY" }
+    - "Lock the door for me" -> { "device": "door_lock", "action": "ON", "type": "CONTROL" }
+    - Compound/casual sentences (reason + request, small talk + request, filler words like
+      "can you", "please", "for me") are common — always extract only the actual device + action,
+      ignore the surrounding reason or politeness wrapper.
+    - If the text has nothing to do with any valid device or sensor (e.g. small talk, unrelated
+      questions), return { "device": "none", "action": "QUERY", "type": "QUERY" }.
+
     Return ONLY a valid JSON object in this format, nothing else:
     { "device": "device_name", "action": "ON/OFF/QUERY", "type": "CONTROL/QUERY" }
 `;
 
-const voiceCache = new Map();
+// Cache ngắn hạn cho câu hỏi lặp lại (vd người dùng hỏi lại "what is the temp"
+// vài giây sau) — giảm số request thật gửi lên LLM, đỡ chạm rate limit free tier.
+const voiceCache = new Map(); // key: text đã chuẩn hoá -> { intent, expiresAt }
 const VOICE_CACHE_TTL_MS = 10_000;
 
 function getCachedIntent(text) {
     const key = text.trim().toLowerCase();
     const hit = voiceCache.get(key);
     if (hit && hit.expiresAt > Date.now()) return hit.intent;
-    if (hit) voiceCache.delete(key);
+    if (hit) voiceCache.delete(key); // hết hạn thì dọn luôn
     return null;
 }
 function setCachedIntent(text, intent) {
@@ -924,7 +922,7 @@ async function callGroq(text) {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            model: 'openai/gpt-oss-20b',
+            model: 'openai/gpt-oss-20b', // Groq khuyến nghị thay llama3-8b-8192 (đã decommission) — xem console.groq.com/docs/deprecations
             messages: [
                 { role: 'system', content: VOICE_SYSTEM_PROMPT },
                 { role: 'user', content: text }
@@ -936,6 +934,8 @@ async function callGroq(text) {
 
     if (!resp.ok) {
         const body = await resp.text().catch(() => '');
+        // Phân biệt rõ 429 (rate limit) với các lỗi khác — để log cho biết chính
+        // xác nguyên nhân thay vì đoán mò.
         const reason = resp.status === 429 ? 'RATE_LIMITED' : `HTTP_${resp.status}`;
         throw new Error(`Groq ${reason}: ${body.slice(0, 200)}`);
     }
@@ -953,7 +953,7 @@ async function callOpenRouter(text) {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            model: 'openrouter/free',
+            model: 'openrouter/free', // router tự chọn model free đang khả dụng — tránh việc phải tự tay đổi tên model mỗi khi OpenRouter đổi danh sách free (đã gãy 1 lần vì hardcode)
             messages: [
                 { role: 'system', content: VOICE_SYSTEM_PROMPT },
                 { role: 'user', content: text }
@@ -972,6 +972,8 @@ async function callOpenRouter(text) {
     return JSON.parse(data.choices[0].message.content);
 }
 
+// Thử Groq trước, hết hạn/lỗi thì thử OpenRouter, cả 2 hỏng thì báo lỗi rõ ràng
+// để route bên dưới trả success:false (app đã có regex fallback xử lý tiếp).
 async function classifyIntent(text) {
     const cached = getCachedIntent(text);
     if (cached) {
@@ -981,19 +983,25 @@ async function classifyIntent(text) {
 
     try {
         const intent = await callGroq(text);
+        console.log(`[🤖 GROQ NLU] "${text}" =>`, intent);
         setCachedIntent(text, intent);
         return intent;
     } catch (groqErr) {
+        console.warn(`[⚠️ GROQ FAILED] "${text}":`, groqErr.message);
         try {
             const intent = await callOpenRouter(text);
+            console.log(`[🤖 OPENROUTER NLU] "${text}" =>`, intent);
             setCachedIntent(text, intent);
             return intent;
         } catch (orErr) {
+            console.warn(`[⚠️ OPENROUTER FAILED] "${text}":`, orErr.message);
             throw new Error('All LLM providers failed');
         }
     }
 }
 
+// Chọn ngẫu nhiên 1 câu trong danh sách — giúp phản hồi đỡ giống 1 khuôn cố định,
+// không cần gọi thêm LLM (tránh tăng request/rate-limit).
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 app.post('/api/voice/llm-command', async (req, res) => {
@@ -1007,11 +1015,15 @@ app.post('/api/voice/llm-command', async (req, res) => {
         try {
             aiIntent = await classifyIntent(text);
         } catch (llmErr) {
+            // Cả Groq lẫn OpenRouter đều lỗi — trả success:false, KHÔNG phải 500,
+            // để app hiểu đây là "LLM tạm thời không dùng được" và tự chuyển sang
+            // regex fallback ở client, thay vì hiện lỗi cứng cho người dùng.
             return res.json({ success: false, message: "Voice service temporarily unavailable." });
         }
 
         const { device, action, type } = aiIntent;
         if (!device || device === "none" || device === "unknown") {
+            // Thay vì từ chối cụt lủn, nói rõ phạm vi hiểu được — đỡ cảm giác "ngố".
             return res.json({
                 success: false,
                 message: "Sorry, I didn't catch that."
@@ -1045,7 +1057,7 @@ app.post('/api/voice/llm-command', async (req, res) => {
                     : pick(["No water leak detected.", "All clear — no leaks right now."]);
             } else if (device === "smoke") {
                 msg = value > 50
-                    ? pick([`Warning! Smoke level is high at ${value} ppm.`, `Careful — smoke reads ${value} ppm.`])
+                    ? pick([`Warning! Smoke level is high at ${value} ppm.`, `Careful — smoke reads ${value} ppm, that's elevated.`])
                     : pick([`Smoke level is normal at ${value} ppm.`, `No concern — smoke reading is ${value} ppm.`]);
             } else {
                 msg = pick([
@@ -1072,15 +1084,15 @@ app.post('/api/voice/llm-command', async (req, res) => {
 
             if (device === 'door_lock') {
                 await pool.query(
-                    `UPDATE room_iot_state SET door_lock = ?, door_open = ?, updated_at = NOW() WHERE room_id = ?`,
+                    `UPDATE room_iot_state SET door_lock = ?, door_open = ? WHERE room_id = ?`,
                     [boolState, !boolState, roomId]
                 );
             } else {
-                await pool.query(`UPDATE room_iot_state SET ${device} = ?, updated_at = NOW() WHERE room_id = ?`, [boolState, roomId]);
+                await pool.query(`UPDATE room_iot_state SET ${device} = ? WHERE room_id = ?`, [boolState, roomId]);
             }
 
             const controlTopic = `hotel/room/${room_number}/control`;
-            mqttClient.publish(controlTopic, JSON.stringify({ sender: 'cloud_render', device, state: boolState }), { qos: 1 });
+            mqttClient.publish(controlTopic, JSON.stringify({ device, state: boolState }), { qos: 1 });
 
             return res.json({ success: true, type: "CONTROL", message: `Successfully ${actionWord} the ${device.replace('_', ' ')}.` });
         }
@@ -1092,21 +1104,16 @@ app.post('/api/voice/llm-command', async (req, res) => {
         res.status(500).json({ success: false, message: "Server error." });
     }
 });
-
-// Wake up cho monitor tránh render tắt
+//wake up cho monitor tránh render tắt
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
-
-// ============================================================
-// ĐIỀU KHIỂN GIẢ LẬP BẰNG COMMENT THEO Ý BẠN
-// Bật: bỏ comment dòng dưới | Tắt: giữ nguyên comment //
-// ============================================================
-// setInterval(runIoTSimulation, 5000);
+//Simulate after 5s
+//setInterval(runIoTSimulation, 5000);
 
 module.exports = app;
 
 if (require.main === module) {
-    const PORT = process.env.PORT || 5000;
+    const PORT = 5000;
     app.listen(PORT, () => {
-        console.log(`🚀 API Hotel Server chạy tại port ${PORT}`);
+        console.log(`🚀 API Hotel Server chạy tại http://localhost:${PORT}`);
     });
 }
