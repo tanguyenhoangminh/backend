@@ -101,8 +101,9 @@ const mqttClient = mqtt.connect(MQTT_BROKER, MQTT_OPTIONS);
 
 mqttClient.on('connect', () => {
     console.log("☁️ Đã kết nối MQTT với HiveMQ Cloud!");
-    mqttClient.subscribe('hotel/room/+/sensors', (err) => {
-        if (!err) console.log("📡 Đang lắng nghe dữ liệu cảm biến từ mạch thật qua cổng 8883...");
+    // Lắng nghe cả 2 topic: Dữ liệu cảm biến VÀ Lệnh điều khiển từ các bên
+    mqttClient.subscribe(['hotel/room/+/sensors', 'hotel/room/+/control'], (err) => {
+        if (!err) console.log("📡 Đang lắng nghe 2 chiều (sensors & control) qua cổng 8883...");
     });
 });
 
@@ -110,43 +111,75 @@ mqttClient.on('message', async (topic, message) => {
     try {
         const topicParts = topic.split('/');
         const roomNumber = topicParts[2]; 
+        const messageType = topicParts[3]; // 'sensors' hoặc 'control'
         
-       
         if (!REAL_ROOMS.includes(roomNumber)) return;
-
-        const sensorData = JSON.parse(message.toString());
 
         const [rooms] = await pool.query("SELECT room_id FROM room WHERE room_number = ?", [roomNumber]);
         if (rooms.length === 0) return;
         const roomId = rooms[0].room_id;
 
-        // Cập nhật sensor + actuator state từ ESP8266
-        // Chỉ update field nào ESP gửi lên, field nào null thì giữ nguyên DB
-        const fields = [];
-        const values = [];
+        const payload = JSON.parse(message.toString());
 
-        if (sensorData.temp      !== undefined) { fields.push('temp=?');      values.push(sensorData.temp); }
-        if (sensorData.humidity  !== undefined) { fields.push('humidity=?');  values.push(sensorData.humidity); }
-        if (sensorData.co2       !== undefined) { fields.push('co2=?');       values.push(sensorData.co2); }
-        if (sensorData.noise     !== undefined) { fields.push('noise=?');     values.push(sensorData.noise); }
-        if (sensorData.light     !== undefined) { fields.push('light=?');     values.push(sensorData.light); }
-        if (sensorData.motion    !== undefined) { fields.push('motion=?');    values.push(sensorData.motion); }
-        if (sensorData.smoke     !== undefined) { fields.push('smoke=?');     values.push(sensorData.smoke); }
-        if (sensorData.smoke_alert !== undefined) { fields.push('siren=?');   values.push(sensorData.smoke_alert); }
-        // Brightness từ Node 2
-        if (sensorData.main_light      !== undefined) { fields.push('main_light=?');      values.push(sensorData.main_light); }
-        if (sensorData.desk_lamp       !== undefined) { fields.push('desk_lamp=?');       values.push(sensorData.desk_lamp); }
-        if (sensorData.main_brightness !== undefined) { fields.push('main_brightness=?'); values.push(sensorData.main_brightness); }
-        if (sensorData.desk_brightness !== undefined) { fields.push('desk_brightness=?'); values.push(sensorData.desk_brightness); }
+        // ==============================================================
+        // 1. NHÁNH XỬ LÝ LỆNH ĐIỀU KHIỂN (Bật/tắt công tắc từ Local/Cloud)
+        // ==============================================================
+        if (messageType === 'control') {
+            const { device, state, brightness } = payload;
+            if (!device) return;
 
-        if (fields.length > 0) {
-            values.push(roomId);
-            await pool.query(
-                `UPDATE room_iot_state SET ${fields.join(', ')} WHERE room_id=?`,
-                values
-            );
+            if (device === 'door_lock') {
+                await pool.query(
+                    "UPDATE room_iot_state SET door_lock = ?, door_open = ? WHERE room_id = ?",
+                    [state, !state ? 1 : 0, roomId]
+                );
+            } else {
+                // Hỗ trợ tất cả thiết bị: fan, curtain, tv, main_power, bedside_lamp, sprinkler...
+                await pool.query(
+                    `UPDATE room_iot_state SET \`${device}\` = ? WHERE room_id = ?`,
+                    [state, roomId]
+                );
+            }
+
+            if (brightness !== undefined && (device === 'main_light' || device === 'desk_lamp')) {
+                const brightnessCol = device === 'main_light' ? 'light_brightness' : 'desk_brightness';
+                await pool.query(`UPDATE room_iot_state SET \`${brightnessCol}\` = ? WHERE room_id = ?`, [brightness, roomId]);
+            }
+            return;
         }
-        
+
+        // ==============================================================
+        // 2. NHÁNH XỬ LÝ DỮ LIỆU CẢM BIẾN (Telemetry)
+        // ==============================================================
+        if (messageType === 'sensors') {
+            const fields = [];
+            const values = [];
+
+            if (payload.temp !== undefined) { fields.push('temp=?'); values.push(payload.temp); }
+            if (payload.humidity !== undefined) { fields.push('humidity=?'); values.push(payload.humidity); }
+            if (payload.co2 !== undefined) { fields.push('co2=?'); values.push(payload.co2); }
+            if (payload.noise !== undefined) { fields.push('noise=?'); values.push(payload.noise); }
+            if (payload.light !== undefined) { fields.push('light=?'); values.push(payload.light); }
+            if (payload.motion !== undefined) { fields.push('motion=?'); values.push(payload.motion); }
+            if (payload.smoke !== undefined) { fields.push('smoke=?'); values.push(payload.smoke); }
+            if (payload.smoke_alert !== undefined) { fields.push('siren=?'); values.push(payload.smoke_alert); }
+            
+            // Brightness & phản hồi trạng thái từ ESP8266
+            if (payload.main_light !== undefined) { fields.push('main_light=?'); values.push(payload.main_light); }
+            if (payload.desk_lamp !== undefined) { fields.push('desk_lamp=?'); values.push(payload.desk_lamp); }
+            if (payload.fan !== undefined) { fields.push('fan=?'); values.push(payload.fan); }
+            if (payload.curtain !== undefined) { fields.push('curtain=?'); values.push(payload.curtain); }
+            if (payload.main_brightness !== undefined) { fields.push('main_brightness=?'); values.push(payload.main_brightness); }
+            if (payload.desk_brightness !== undefined) { fields.push('desk_brightness=?'); values.push(payload.desk_brightness); }
+
+            if (fields.length > 0) {
+                values.push(roomId);
+                await pool.query(
+                    `UPDATE room_iot_state SET ${fields.join(', ')} WHERE room_id=?`,
+                    values
+                );
+            }
+        }
     } catch (error) {
         console.error("Lỗi xử lý tin nhắn MQTT:", error);
     }
