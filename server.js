@@ -1104,6 +1104,40 @@ app.post('/api/voice/llm-command', async (req, res) => {
         res.status(500).json({ success: false, message: "Server error." });
     }
 });
+
+// Endpoint nhận batch prediction từ Raspberry Pi đẩy lên
+app.post('/api/sync/predictions', async (req, res) => {
+    const { predictions } = req.body;
+    if (!predictions || !Array.isArray(predictions) || predictions.length === 0) {
+        return res.json({ success: true, count: 0, message: "No predictions to sync" });
+    }
+
+    try {
+        const values = predictions.map(p => [
+            p.room_number,
+            p.model_name || 'RandomForest',
+            p.model_version || null,
+            p.features_used ? (typeof p.features_used === 'string' ? p.features_used : JSON.stringify(p.features_used)) : null,
+            p.predicted_humidity,
+            p.predicted_co2,
+            p.predicted_energy_kwh,
+            p.predicted_at
+        ]);
+
+        const sql = `
+            INSERT INTO ai_prediction 
+            (room_number, model_name, model_version, features_used, predicted_humidity, predicted_co2, predicted_energy_kwh, predicted_at) 
+            VALUES ?
+        `;
+
+        await pool.query(sql, [values]);
+        console.log(`☁️ [Railway Sync] Đã lưu ${predictions.length} bản ghi AI từ Pi.`);
+        res.status(201).json({ success: true, count: predictions.length });
+    } catch (error) {
+        console.error("❌ Railway Sync Error:", error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
 //wake up cho monitor tránh render tắt
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 //Simulate after 5s
